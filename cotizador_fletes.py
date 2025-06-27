@@ -1,19 +1,32 @@
 import pandas as pd
-from math import radians, sin, cos, sqrt, atan2
+import streamlit as st
 from datetime import datetime
-import os
+from geopy.distance import geodesic
 import unicodedata
+import io
 from fpdf import FPDF
+import tempfile
+import os
 
-# -------------------- Funciones -------------------- #
+CSV_FILENAME = "municipios_mexico.csv"  # Cambia si tu archivo tiene otro nombre
+
+def normaliza(texto):
+    if pd.isna(texto):
+        return ""
+    return ''.join(
+        c for c in unicodedata.normalize('NFKD', str(texto))
+        if not unicodedata.combining(c)
+    ).lower().strip()
+
+@st.cache_data
+def load_municipios(filename):
+    df = pd.read_csv(filename, encoding="utf-8", dtype=str)
+    df['Longitud'] = df['Longitud'].astype(float)
+    df['Latitud'] = df['Latitud'].astype(float)
+    return df
+
 def calcular_distancia(lat1, lon1, lat2, lon2):
-    R = 6371.0
-    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
-    dlon = lon2 - lon1
-    dlat = lat2 - lat1
-    a = sin(dlat / 2)**2 + cos(lat1) * cos(lat2) * sin(dlon / 2)**2
-    c = 2 * atan2(sqrt(a), sqrt(1 - a))
-    return round(R * c, 2)
+    return round(geodesic((lat1, lon1), (lat2, lon2)).km, 2)
 
 def obtener_tarifa_por_distancia(distancia):
     if distancia <= 400:
@@ -29,137 +42,217 @@ def obtener_tarifa_por_distancia(distancia):
     else:
         return 10500
 
-def cotizar_servicio(distancia, peso_vol):
-    if peso_vol <= 1:
-        unidad = "1 Ton"
-    elif peso_vol <= 3:
-        unidad = "3 Ton"
-    elif peso_vol <= 5:
-        unidad = "5 Ton"
-    else:
-        unidad = "10 Ton"
-
-    tarifas_banderazo = {"1 Ton": 2500, "3 Ton": 3000, "5 Ton": 3500, "10 Ton": 4000}
-    tarifas_km = {"1 Ton": 13, "3 Ton": 15, "5 Ton": 19, "10 Ton": 23}
-
-    if distancia <= 50:
-        costo = tarifas_banderazo[unidad]
-        detalle = f"Banderazo para {unidad} ({distancia:.2f} km, <=50 km)"
-    else:
-        costo = tarifas_banderazo[unidad] + (distancia - 50) * tarifas_km[unidad]
-        detalle = (
-            f"${tarifas_banderazo[unidad]:,.2f} (banderazo hasta 50 km) + "
-            f"{(distancia - 50):.2f} km x ${tarifas_km[unidad]:,.2f}/km"
-        )
-    return unidad, round(costo, 2), detalle
-
-def generar_pdf(nombre_cliente, servicio, origen, destino, distancia, costo, detalle, observaciones):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=12)
-
-    pdf.cell(200, 10, txt="Cotización de Transporte", ln=True, align="C")
-    pdf.ln(10)
-
-    pdf.cell(200, 10, txt=f"Cliente: {nombre_cliente}", ln=True)
-    pdf.cell(200, 10, txt=f"Servicio: {servicio}", ln=True)
-    pdf.cell(200, 10, txt=f"Origen: {origen}", ln=True)
-    pdf.cell(200, 10, txt=f"Destino: {destino}", ln=True)
-    pdf.cell(200, 10, txt=f"Distancia: {distancia} km", ln=True)
-    pdf.cell(200, 10, txt=f"Costo estimado: ${costo:,.2f}", ln=True)
-    pdf.multi_cell(200, 10, txt=f"Detalle: {detalle}")
-    pdf.ln(5)
-    pdf.multi_cell(200, 10, txt=f"Observaciones: {observaciones}")
-
-    filename = f"cotizacion_{nombre_cliente.replace(' ', '_')}.pdf"
-    pdf.output(filename)
-    return filename
-
-def guardar_excel(cotizacion, archivo='historial_cotizaciones.xlsx'):
-    columnas = ["Fecha", "Cliente", "Servicio", "Origen", "Destino", "Distancia_km", "Costo", "Detalle", "Observaciones"]
-    nueva_fila = pd.DataFrame([cotizacion], columns=columnas)
-
-    if os.path.exists(archivo):
-        df_existente = pd.read_excel(archivo)
-        df_final = pd.concat([df_existente, nueva_fila], ignore_index=True)
-    else:
-        df_final = nueva_fila
-
-    df_final.to_excel(archivo, index=False)
-
-def normaliza(texto):
-    if pd.isna(texto):
-        return ""
-    return ''.join(
-        c for c in unicodedata.normalize('NFKD', str(texto))
-        if not unicodedata.combining(c)
-    ).lower()
-
-# -------------------- Carga de Datos -------------------- #
-df_municipios = pd.read_csv("municipios_mexico.csv", encoding='utf-8')
-df_municipios.rename(columns={
-    'Estado': 'estado',
-    'Ciudad': 'municipio',
-    'Longitud': 'longitud',
-    'Latitud': 'latitud'
-}, inplace=True)
-
-# -------------------- Ejemplo de Uso -------------------- #
-if __name__ == '__main__':
-    nombre_cliente = input("Nombre del cliente: ")
-    servicio = input("Servicio (FTL / LTL / Mudanza): ").strip().upper()
-    origen = input("Municipio de origen: ").strip()
-    destino = input("Municipio de destino: ").strip()
-
-    origen_norm = normaliza(origen)
-    destino_norm = normaliza(destino)
-
-    datos_origen = df_municipios[df_municipios['municipio'].apply(normaliza) == origen_norm]
-    datos_destino = df_municipios[df_municipios['municipio'].apply(normaliza) == destino_norm]
-
-    if datos_origen.empty or datos_destino.empty:
-        print("Error: municipio no encontrado.")
-        exit()
-
-    lat1, lon1 = datos_origen.iloc[0][['latitud', 'longitud']]
-    lat2, lon2 = datos_destino.iloc[0][['latitud', 'longitud']]
-    distancia = calcular_distancia(float(lat1), float(lon1), float(lat2), float(lon2))
-
-    detalle = ""
-    costo = 0
-
-    if servicio == "FTL" or servicio == "MUDANZA":
-        peso_vol = float(input("Ingresa el peso/volumen estimado en toneladas: "))
-        unidad, costo, detalle = cotizar_servicio(distancia, peso_vol)
-        if servicio == "MUDANZA":
-            maniobras = float(input("Costo adicional por maniobras ($): "))
-            costo += maniobras
-            detalle += f" + ${maniobras:.2f} por maniobras"
-
-    elif servicio == "LTL":
-        largo = float(input("Largo (cm): "))
-        ancho = float(input("Ancho (cm): "))
-        alto = float(input("Alto (cm): "))
-        volumen_cm3 = largo * ancho * alto
-        volumen_m3 = volumen_cm3 / 1_000_000
+def cotizar_servicio(distancia, peso_vol, servicio, maniobras=0, volumen_m3=0):
+    if servicio == "LTL":
         tarifa_m3 = obtener_tarifa_por_distancia(distancia)
         costo = round(volumen_m3 * tarifa_m3, 2)
         detalle = f"{volumen_m3:.4f} m3 x ${tarifa_m3:,.2f}/m3"
+        unidad = "LTL"
+    else:
+        if peso_vol <= 1:
+            unidad = "1 Ton"
+        elif peso_vol <= 3:
+            unidad = "3 Ton"
+        elif peso_vol <= 5:
+            unidad = "5 Ton"
+        else:
+            unidad = "10 Ton"
 
-    observaciones = input("Observaciones del servicio: ")
+        tarifas_banderazo = {"1 Ton": 2500, "3 Ton": 3000, "5 Ton": 3500, "10 Ton": 4000}
+        tarifas_km = {"1 Ton": 13, "3 Ton": 15, "5 Ton": 19, "10 Ton": 23}
 
-    cotizacion = [
-        datetime.today().strftime('%Y-%m-%d'),
-        nombre_cliente,
-        servicio,
-        origen,
-        destino,
-        distancia,
-        costo,
-        detalle,
-        observaciones
-    ]
+        if distancia <= 50:
+            costo = tarifas_banderazo[unidad]
+            detalle = f"Banderazo para {unidad} ({distancia:.2f} km, <=50 km)"
+        else:
+            costo = tarifas_banderazo[unidad] + (distancia - 50) * tarifas_km[unidad]
+            detalle = (
+                f"${tarifas_banderazo[unidad]:,.2f} (banderazo hasta 50 km) + "
+                f"{(distancia - 50):.2f} km x ${tarifas_km[unidad]:,.2f}/km"
+            )
+        if servicio == "MUDANZA":
+            costo += maniobras
+            detalle += f" + ${maniobras:,.2f} por maniobras"
+    return unidad, round(costo, 2), detalle
 
-    guardar_excel(cotizacion)
-    archivo_pdf = generar_pdf(nombre_cliente, servicio, origen, destino, distancia, costo, detalle, observaciones)
-    print(f"Cotización guardada en Excel y exportada a PDF como: {archivo_pdf}")
+def generar_pdf(cotizacion):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    pdf.cell(200, 10, txt="Cotización de Transporte", ln=True, align="C")
+    pdf.ln(10)
+    pdf.cell(200, 10, txt=f"Fecha de cotización: {cotizacion['Fecha cotización']}", ln=True)
+    pdf.cell(200, 10, txt=f"Cliente: {cotizacion['Cliente']}", ln=True)
+    pdf.cell(200, 10, txt=f"Servicio: {cotizacion['Servicio']}", ln=True)
+    pdf.cell(200, 10, txt=f"Origen: {cotizacion['Origen']}", ln=True)
+    pdf.cell(200, 10, txt=f"Destino: {cotizacion['Destino']}", ln=True)
+    pdf.cell(200, 10, txt=f"Distancia: {cotizacion['Distancia (km)']} km", ln=True)
+    pdf.cell(200, 10, txt=f"Tipo de unidad: {cotizacion['Tipo de unidad']}", ln=True)
+    pdf.cell(200, 10, txt=f"Peso/Volumen: {cotizacion['Peso/Vol (Ton)']}", ln=True)
+    if cotizacion['Volumen (m3)']:
+        pdf.cell(200, 10, txt=f"Volumen (m3): {cotizacion['Volumen (m3)']}", ln=True)
+    pdf.cell(200, 10, txt=f"Costo total: ${cotizacion['Costo Total MXN']:,.2f}", ln=True)
+    pdf.multi_cell(200, 10, txt=f"Detalle: {cotizacion['Detalle']}")
+    pdf.multi_cell(200, 10, txt=f"Observaciones: {cotizacion['Observaciones']}")
+    pdf.cell(200, 10, txt=f"Fecha de servicio: {cotizacion['Fecha de servicio']}", ln=True)
+    # Guardar en archivo temporal para descargar
+    tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    pdf.output(tmpfile.name)
+    return tmpfile.name
+
+def main():
+    st.set_page_config(page_title="Cotizador de Fletes", layout="centered")
+    st.title("Cotizador de Fletes por Municipio")
+
+    df = load_municipios(CSV_FILENAME)
+    municipios_opciones = df['Ciudad'] + " (" + df['Estado'] + ")"
+
+    with st.form("cotizador_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            origen = st.selectbox("Municipio de origen", municipios_opciones, key="origen")
+        with col2:
+            destino = st.selectbox("Municipio de destino", municipios_opciones, key="destino")
+        servicio = st.selectbox("Tipo de servicio", ["FTL", "LTL", "MUDANZA"], key="servicio")
+        nombre_cliente = st.text_input("Nombre del cliente")
+        peso_vol = None
+        volumen_m3 = ""
+        maniobras = 0
+        if servicio in ["FTL", "MUDANZA"]:
+            peso_vol = st.number_input("Peso/Volumen estimado (Toneladas)", min_value=0.01, max_value=10.0, value=1.0, step=0.01)
+        if servicio == "MUDANZA":
+            maniobras = st.number_input("Costo adicional por maniobras ($)", min_value=0.0, value=0.0, step=1.0)
+        if servicio == "LTL":
+            col3, col4, col5 = st.columns(3)
+            with col3:
+                largo = st.number_input("Largo (cm)", min_value=1.0, value=100.0, step=1.0)
+            with col4:
+                ancho = st.number_input("Ancho (cm)", min_value=1.0, value=100.0, step=1.0)
+            with col5:
+                alto = st.number_input("Alto (cm)", min_value=1.0, value=100.0, step=1.0)
+            volumen_cm3 = largo * ancho * alto
+            volumen_m3 = volumen_cm3 / 1_000_000
+        observaciones = st.text_area("Observaciones del servicio")
+        fecha_servicio = st.date_input("Fecha de servicio", value=datetime.today())
+        submitted = st.form_submit_button("Cotizar")
+
+    historial = st.session_state.get("historial", [])
+
+    if submitted:
+        if origen == destino:
+            st.error("El municipio de origen y destino deben ser diferentes.")
+        else:
+            ciudad_o, estado_o = origen.rsplit(" (", 1)
+            ciudad_d, estado_d = destino.rsplit(" (", 1)
+            ciudad_o = normaliza(ciudad_o)
+            estado_o = normaliza(estado_o.replace(")", ""))
+            ciudad_d = normaliza(ciudad_d)
+            estado_d = normaliza(estado_d.replace(")", ""))
+
+            row_o = df[(df['Ciudad'].apply(normaliza)==ciudad_o) & (df['Estado'].apply(normaliza)==estado_o)]
+            row_d = df[(df['Ciudad'].apply(normaliza)==ciudad_d) & (df['Estado'].apply(normaliza)==estado_d)]
+
+            if row_o.empty or row_d.empty:
+                st.error("No se encontró alguno de los municipios en la base de datos.")
+            else:
+                lat1, lon1 = row_o.iloc[0][['Latitud', 'Longitud']]
+                lat2, lon2 = row_d.iloc[0][['Latitud', 'Longitud']]
+                distancia = calcular_distancia(float(lat1), float(lon1), float(lat2), float(lon2))
+
+                unidad, costo, detalle = cotizar_servicio(
+                    distancia,
+                    peso_vol if peso_vol else 0,
+                    servicio,
+                    maniobras,
+                    volumen_m3 if volumen_m3 else 0
+                )
+
+                cotizacion = {
+                    "Fecha cotización": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    "Cliente": nombre_cliente,
+                    "Servicio": servicio,
+                    "Origen": origen,
+                    "Destino": destino,
+                    "Distancia (km)": distancia,
+                    "Tipo de unidad": unidad,
+                    "Peso/Vol (Ton)": peso_vol if peso_vol else "",
+                    "Volumen (m3)": round(volumen_m3, 4) if volumen_m3 else "",
+                    "Costo Total MXN": costo,
+                    "Detalle": detalle,
+                    "Observaciones": observaciones,
+                    "Fecha de servicio": fecha_servicio.strftime("%Y-%m-%d"),
+                }
+                if "historial" not in st.session_state:
+                    st.session_state["historial"] = []
+                st.session_state["historial"].append(cotizacion)
+                historial = st.session_state["historial"]
+
+                st.success(
+                    f"""**Cotización**
+- Cliente: {cotizacion['Cliente']}
+- Servicio: {cotizacion['Servicio']}
+- Origen: {cotizacion['Origen']}
+- Destino: {cotizacion['Destino']}
+- Distancia: {cotizacion['Distancia (km)']:.2f} km
+- Tipo de unidad: {cotizacion['Tipo de unidad']}
+- Peso/Volumen: {cotizacion['Peso/Vol (Ton)']}
+- Volumen (m3): {cotizacion['Volumen (m3)']}
+- Costo total: ${cotizacion['Costo Total MXN']:,.2f}
+- Detalle: {cotizacion['Detalle']}
+- Observaciones: {cotizacion['Observaciones']}
+- Fecha de servicio: {cotizacion['Fecha de servicio']}
+"""
+                )
+
+                cotizacion_df = pd.DataFrame([cotizacion])
+                st.dataframe(cotizacion_df)
+
+                # Botón para descargar PDF de la cotización individual
+                pdf_path = generar_pdf(cotizacion)
+                with open(pdf_path, "rb") as f:
+                    st.download_button(
+                        label="Descargar cotización en PDF",
+                        data=f,
+                        file_name=f"cotizacion_{cotizacion['Cliente'].replace(' ', '_')}.pdf",
+                        mime="application/pdf"
+                    )
+                os.remove(pdf_path)
+
+                # Botón para bajar el Excel de la cotización individual
+                output = io.BytesIO()
+                cotizacion_df.to_excel(output, index=False, engine='openpyxl')
+                st.download_button(
+                    label="Descargar cotización en Excel",
+                    data=output.getvalue(),
+                    file_name="cotizacion.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+    st.markdown("---")
+    st.subheader("Historial de cotizaciones (de esta sesión)")
+    if historial:
+        df_hist = pd.DataFrame(historial)
+        st.dataframe(df_hist)
+        output_hist = io.BytesIO()
+        df_hist.to_excel(output_hist, index=False, engine='openpyxl')
+        st.download_button(
+            label="Descargar historial en Excel",
+            data=output_hist.getvalue(),
+            file_name="historial_cotizaciones.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.info("Aún no hay cotizaciones en esta sesión.")
+
+    st.markdown("---")
+    st.markdown(
+        """
+        <small>
+        Desarrollado con IA para Eggarzon. Contacto: eggarzon@gmail.com
+        </small>
+        """,
+        unsafe_allow_html=True
+    )
+
+if __name__ == "__main__":
+    main()
