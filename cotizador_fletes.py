@@ -2,6 +2,7 @@ import pandas as pd
 from math import radians, sin, cos, sqrt, atan2
 from datetime import datetime
 import os
+import unicodedata
 from fpdf import FPDF
 
 # -------------------- Funciones -------------------- #
@@ -86,6 +87,14 @@ def guardar_excel(cotizacion, archivo='historial_cotizaciones.xlsx'):
 
     df_final.to_excel(archivo, index=False)
 
+def normaliza(texto):
+    if pd.isna(texto):
+        return ""
+    return ''.join(
+        c for c in unicodedata.normalize('NFKD', str(texto))
+        if not unicodedata.combining(c)
+    ).lower()
+
 # -------------------- Carga de Datos -------------------- #
 df_municipios = pd.read_csv("municipios_mexico.csv", encoding='utf-8')
 df_municipios.rename(columns={
@@ -94,7 +103,6 @@ df_municipios.rename(columns={
     'Longitud': 'longitud',
     'Latitud': 'latitud'
 }, inplace=True)
-df_municipios['municipio'] = df_municipios['municipio'].apply(lambda x: x.encode('latin1').decode('utf-8', errors='ignore'))
 
 # -------------------- Ejemplo de Uso -------------------- #
 if __name__ == '__main__':
@@ -103,8 +111,11 @@ if __name__ == '__main__':
     origen = input("Municipio de origen: ").strip()
     destino = input("Municipio de destino: ").strip()
 
-    datos_origen = df_municipios[df_municipios['municipio'].str.lower() == origen.lower()]
-    datos_destino = df_municipios[df_municipios['municipio'].str.lower() == destino.lower()]
+    origen_norm = normaliza(origen)
+    destino_norm = normaliza(destino)
+
+    datos_origen = df_municipios[df_municipios['municipio'].apply(normaliza) == origen_norm]
+    datos_destino = df_municipios[df_municipios['municipio'].apply(normaliza) == destino_norm]
 
     if datos_origen.empty or datos_destino.empty:
         print("Error: municipio no encontrado.")
@@ -112,7 +123,7 @@ if __name__ == '__main__':
 
     lat1, lon1 = datos_origen.iloc[0][['latitud', 'longitud']]
     lat2, lon2 = datos_destino.iloc[0][['latitud', 'longitud']]
-    distancia = calcular_distancia(lat1, lon1, lat2, lon2)
+    distancia = calcular_distancia(float(lat1), float(lon1), float(lat2), float(lon2))
 
     detalle = ""
     costo = 0
