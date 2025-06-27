@@ -8,7 +8,18 @@ from fpdf import FPDF
 import tempfile
 import os
 
-CSV_FILENAME = "municipios_mexico.csv"  # Cambia si tu archivo tiene otro nombre
+CSV_FILENAME = "municipios_mexico.csv"
+
+def limpia_texto(texto):
+    # Normaliza y elimina caracteres extraños/acentos
+    if pd.isna(texto):
+        return ""
+    txt = ''.join(
+        c for c in unicodedata.normalize('NFKD', str(texto))
+        if not unicodedata.combining(c)
+    )
+    txt = txt.replace("’", "'").replace("“", '"').replace("”", '"').replace("–", "-")
+    return txt.strip()
 
 def normaliza(texto):
     if pd.isna(texto):
@@ -21,8 +32,13 @@ def normaliza(texto):
 @st.cache_data
 def load_municipios(filename):
     df = pd.read_csv(filename, encoding="utf-8", dtype=str)
-    df['Longitud'] = df['Longitud'].astype(float)
-    df['Latitud'] = df['Latitud'].astype(float)
+    df['Estado'] = df['Estado'].apply(limpia_texto)
+    df['Ciudad'] = df['Ciudad'].apply(limpia_texto)
+    df['Longitud'] = pd.to_numeric(df['Longitud'], errors='coerce')
+    df['Latitud'] = pd.to_numeric(df['Latitud'], errors='coerce')
+    # FILTRA SOLO REGISTROS VÁLIDOS DE MÉXICO
+    df = df[(df['Latitud'].between(14, 33)) & (df['Longitud'].between(-119, -85))]
+    df = df.dropna(subset=['Latitud','Longitud'])
     return df
 
 def calcular_distancia(lat1, lon1, lat2, lon2):
@@ -92,10 +108,8 @@ def generar_pdf(cotizacion):
     if cotizacion['Volumen (m3)']:
         pdf.cell(200, 10, txt=f"Volumen (m3): {cotizacion['Volumen (m3)']}", ln=True)
     pdf.cell(200, 10, txt=f"Costo total: ${cotizacion['Costo Total MXN']:,.2f}", ln=True)
-    pdf.multi_cell(200, 10, txt=f"Detalle: {cotizacion['Detalle']}")
     pdf.multi_cell(200, 10, txt=f"Observaciones: {cotizacion['Observaciones']}")
     pdf.cell(200, 10, txt=f"Fecha de servicio: {cotizacion['Fecha de servicio']}", ln=True)
-    # Guardar en archivo temporal para descargar
     tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     pdf.output(tmpfile.name)
     return tmpfile.name
@@ -153,10 +167,18 @@ def main():
             row_d = df[(df['Ciudad'].apply(normaliza)==ciudad_d) & (df['Estado'].apply(normaliza)==estado_d)]
 
             if row_o.empty or row_d.empty:
-                st.error("No se encontró alguno de los municipios en la base de datos.")
+                st.error("No se encontró alguno de los municipios en la base de datos o sus coordenadas no son válidas.")
             else:
                 lat1, lon1 = row_o.iloc[0][['Latitud', 'Longitud']]
                 lat2, lon2 = row_d.iloc[0][['Latitud', 'Longitud']]
+                # Validar rangos antes de calcular distancia
+                if not (14 <= float(lat1) <= 33 and 14 <= float(lat2) <= 33):
+                    st.error(f"Latitud fuera de rango para México: Origen {lat1}, Destino {lat2}")
+                    return
+                if not (-119 <= float(lon1) <= -85 and -119 <= float(lon2) <= -85):
+                    st.error(f"Longitud fuera de rango para México: Origen {lon1}, Destino {lon2}")
+                    return
+
                 distancia = calcular_distancia(float(lat1), float(lon1), float(lat2), float(lon2))
 
                 unidad, costo, detalle = cotizar_servicio(
@@ -187,6 +209,7 @@ def main():
                 st.session_state["historial"].append(cotizacion)
                 historial = st.session_state["historial"]
 
+                # Cotización individual (sin mostrar detalle)
                 st.success(
                     f"""**Cotización**
 - Cliente: {cotizacion['Cliente']}
@@ -198,14 +221,13 @@ def main():
 - Peso/Volumen: {cotizacion['Peso/Vol (Ton)']}
 - Volumen (m3): {cotizacion['Volumen (m3)']}
 - Costo total: ${cotizacion['Costo Total MXN']:,.2f}
-- Detalle: {cotizacion['Detalle']}
 - Observaciones: {cotizacion['Observaciones']}
 - Fecha de servicio: {cotizacion['Fecha de servicio']}
 """
                 )
 
                 cotizacion_df = pd.DataFrame([cotizacion])
-                st.dataframe(cotizacion_df)
+                st.dataframe(cotizacion_df.drop(columns=["Detalle"]))
 
                 # Botón para descargar PDF de la cotización individual
                 pdf_path = generar_pdf(cotizacion)
@@ -220,7 +242,7 @@ def main():
 
                 # Botón para bajar el Excel de la cotización individual
                 output = io.BytesIO()
-                cotizacion_df.to_excel(output, index=False, engine='openpyxl')
+                cotizacion_df.drop(columns=["Detalle"]).to_excel(output, index=False, engine='openpyxl')
                 st.download_button(
                     label="Descargar cotización en Excel",
                     data=output.getvalue(),
